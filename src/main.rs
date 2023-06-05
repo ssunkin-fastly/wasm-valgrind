@@ -12,7 +12,7 @@ enum AccessError {
     InvalidRead {addr: usize, len: usize},
     InvalidWrite {addr: usize, len: usize},
     DoubleFree {addr: usize, len: usize},
-    OutOfBounds {addr: usize, len: usize},
+    OutOfBounds {addr: usize, len: usize}
 }
 
 #[derive(Clone)]
@@ -25,7 +25,6 @@ enum MemState {
 impl Valgrind {
     fn new(mem_size: usize, max_stack_size: usize) -> Valgrind {
         let metadata = vec![MemState::Unallocated; mem_size];
-        //stack_pointer indicated highest byte of stack (inclusive), so stack is always from 0..stack_pointer
         let stack_pointer = max_stack_size;
         Valgrind { metadata, stack_pointer, max_stack_size }
     }
@@ -85,17 +84,25 @@ impl Valgrind {
     fn is_in_bounds(&self, addr: usize, len: usize) -> bool {
         addr + len <= self.metadata.len() && self.max_stack_size < addr
     }
-    fn shrink_stack(&mut self, num_bytes: usize) {
+    fn shrink_stack(&mut self, num_bytes: usize) -> Result<(), AccessError> {
+        if self.stack_pointer + num_bytes > self.max_stack_size {
+            return Err(AccessError::OutOfBounds {addr: self.stack_pointer, len: num_bytes});
+        }
         for i in self.stack_pointer..self.stack_pointer + num_bytes {
             self.metadata[i] = MemState::Unallocated;
         }
-        self.stack_pointer = min(self.max_stack_size, self.stack_pointer + num_bytes);
+        self.stack_pointer = self.stack_pointer + num_bytes;
+        Ok(())
     }
-    fn grow_stack(&mut self, num_bytes: usize) {
+    fn grow_stack(&mut self, num_bytes: usize) -> Result<(), AccessError> {
+        if self.stack_pointer < num_bytes {
+            return Err(AccessError::OutOfBounds {addr: self.stack_pointer, len: num_bytes});
+        }
         for i in self.stack_pointer - num_bytes..self.stack_pointer {
             self.metadata[i] = MemState::ValidToReadWrite;
         }
-        self.stack_pointer = max(0, self.stack_pointer - num_bytes);
+        self.stack_pointer = self.stack_pointer - num_bytes;
+        Ok(())
     }
 }
 
@@ -180,11 +187,11 @@ fn stack_grow_shrink_no_error() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
 
     assert_eq!(valgrind_state.max_stack_size, 1024);
-    valgrind_state.grow_stack(256);
+    assert!(valgrind_state.grow_stack(256).is_ok());
     assert_eq!(valgrind_state.stack_pointer, 768);
     assert!(valgrind_state.malloc(1024 * 2, 32).is_ok());
     assert!(valgrind_state.free(1024 * 2, 32).is_ok());
-    valgrind_state.shrink_stack(128);
+    assert!(valgrind_state.shrink_stack(128).is_ok());
     assert_eq!(valgrind_state.stack_pointer, 896);
 }
 
@@ -192,7 +199,7 @@ fn stack_grow_shrink_no_error() {
 fn bad_stack_malloc() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
 
-    valgrind_state.grow_stack(1024);
+    assert!(valgrind_state.grow_stack(1024).is_ok());
     assert_eq!(valgrind_state.stack_pointer, 0);
     assert_eq!(valgrind_state.malloc(512, 32), Err(AccessError::OutOfBounds {addr: 512, len: 32}));
     assert_eq!(valgrind_state.malloc(1022, 32), Err(AccessError::OutOfBounds {addr: 1022, len: 32}));
@@ -202,8 +209,28 @@ fn bad_stack_malloc() {
 fn bad_stack_access() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
 
-    valgrind_state.grow_stack(512);
+    assert!(valgrind_state.grow_stack(512).is_ok());
     assert_eq!(valgrind_state.stack_pointer, 512);
     assert_eq!(valgrind_state.read(256, 16), Err(AccessError::OutOfBounds {addr: 256, len: 16}));
     assert_eq!(valgrind_state.write(500, 32), Err(AccessError::OutOfBounds {addr: 500, len: 32}));
+}
+
+#[test]
+fn stack_overflow() {
+    let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
+
+    assert!(valgrind_state.grow_stack(512).is_ok());
+    assert_eq!(valgrind_state.grow_stack(524), Err(AccessError::OutOfBounds {addr: 512, len: 524}));
+    assert_eq!(valgrind_state.stack_pointer, 512);
+    assert_eq!(valgrind_state.read(256, 16), Err(AccessError::OutOfBounds {addr: 256, len: 16}));
+    assert_eq!(valgrind_state.write(500, 32), Err(AccessError::OutOfBounds {addr: 500, len: 32}));
+}
+
+#[test]
+fn stack_underflow() {
+    let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
+
+    assert!(valgrind_state.grow_stack(32).is_ok());
+    assert_eq!(valgrind_state.shrink_stack(64), Err(AccessError::OutOfBounds {addr: 992, len: 64}));
+    assert_eq!(valgrind_state.stack_pointer, 992);
 }
