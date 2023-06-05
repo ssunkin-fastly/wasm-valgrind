@@ -1,3 +1,5 @@
+use std::cmp::*;
+
 struct Valgrind {
     metadata: Vec<MemState>,
     stack_pointer: usize,
@@ -87,13 +89,13 @@ impl Valgrind {
         for i in self.stack_pointer..self.stack_pointer + num_bytes {
             self.metadata[i] = MemState::Unallocated;
         }
-        self.stack_pointer = std::cmp::min(self.max_stack_size, self.stack_pointer + num_bytes);
+        self.stack_pointer = min(self.max_stack_size, self.stack_pointer + num_bytes);
     }
     fn grow_stack(&mut self, num_bytes: usize) {
         for i in self.stack_pointer - num_bytes..self.stack_pointer {
             self.metadata[i] = MemState::ValidToReadWrite;
         }
-        self.stack_pointer = std::cmp::max(0, self.stack_pointer - num_bytes);
+        self.stack_pointer = max(0, self.stack_pointer - num_bytes);
     }
 }
 
@@ -174,7 +176,7 @@ fn error_type() {
 }
 
 #[test]
-fn stack_grow_no_error() {
+fn stack_grow_shrink_no_error() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
 
     assert_eq!(valgrind_state.max_stack_size, 1024);
@@ -182,6 +184,8 @@ fn stack_grow_no_error() {
     assert_eq!(valgrind_state.stack_pointer, 768);
     assert!(valgrind_state.malloc(1024 * 2, 32).is_ok());
     assert!(valgrind_state.free(1024 * 2, 32).is_ok());
+    valgrind_state.shrink_stack(128);
+    assert_eq!(valgrind_state.stack_pointer, 896);
 }
 
 #[test]
