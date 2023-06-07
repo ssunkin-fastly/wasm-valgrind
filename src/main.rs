@@ -1,3 +1,7 @@
+/*
+The following imploementation assumes that the stack sits at the bottom of memory.
+*/
+
 use std::cmp::*;
 
 struct Valgrind {
@@ -29,16 +33,21 @@ impl Valgrind {
         Valgrind { metadata, stack_pointer, max_stack_size }
     }
     fn malloc(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
-        if !self.is_in_bounds(addr, len) {
+        if !(self.is_in_bounds(addr, len) && self.max_stack_size < addr) {
             return Err(AccessError::OutOfBounds {addr: addr, len: len});
         }
         for i in addr..addr+len {
-            if let MemState::ValidToWrite = self.metadata[i] {
-                return Err(AccessError::DoubleMalloc {addr: addr, len: len});
+            match self.metadata[i] {
+                MemState::ValidToWrite => {
+                    return Err(AccessError::DoubleMalloc {addr: addr, len: len});
+                }
+                MemState::ValidToReadWrite => {
+                    return Err(AccessError::DoubleMalloc {addr: addr, len: len});
+                }
+                _ => {}
             }
-            if let MemState::ValidToReadWrite = self.metadata[i] {
-                return Err(AccessError::DoubleMalloc {addr: addr, len: len});
-            }
+        }
+        for i in addr..addr+len {
             self.metadata[i] = MemState::ValidToWrite;
         }
         Ok(())
@@ -48,11 +57,14 @@ impl Valgrind {
             return Err(AccessError::OutOfBounds {addr: addr, len: len});
         }
         for i in addr..addr+len {
-            if let MemState::Unallocated = self.metadata[i] {
-                return Err(AccessError::InvalidRead {addr: addr, len: len});
-            }
-            if let MemState::ValidToWrite = self.metadata[i] {
-                return Err(AccessError::InvalidRead {addr: addr, len: len});
+            match self.metadata[i] {
+                MemState::Unallocated => {
+                    return Err(AccessError::InvalidRead {addr: addr, len: len});
+                }
+                MemState::ValidToWrite => {
+                    return Err(AccessError::InvalidRead {addr: addr, len: len});
+                }
+                _ => {}
             }
         }
         Ok(())
@@ -65,43 +77,42 @@ impl Valgrind {
             if let MemState::Unallocated = self.metadata[i] {
                 return Err(AccessError::InvalidWrite {addr: addr, len: len});
             }
-            self.metadata[i] = MemState::ValidToReadWrite
+        }
+        for i in addr..addr+len {
+            self.metadata[i] = MemState::ValidToReadWrite;
         }
         Ok(())
     }
     fn free(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
-        if !self.is_in_bounds(addr, len) {
+        if !(self.is_in_bounds(addr, len) && self.max_stack_size < addr) {
             return Err(AccessError::OutOfBounds {addr: addr, len: len});
         }
         for i in addr..addr+len {
             if let MemState::Unallocated = self.metadata[i] {
                 return Err(AccessError::DoubleFree {addr: addr, len: len});
             }
+        }
+        for i in addr..addr+len {
             self.metadata[i] = MemState::Unallocated;
         }
         Ok(())
     }
     fn is_in_bounds(&self, addr: usize, len: usize) -> bool {
-        addr + len <= self.metadata.len() && self.max_stack_size < addr
+        addr + len <= self.metadata.len() 
     }
-    fn shrink_stack(&mut self, num_bytes: usize) -> Result<(), AccessError> {
-        if self.stack_pointer + num_bytes > self.max_stack_size {
-            return Err(AccessError::OutOfBounds {addr: self.stack_pointer, len: num_bytes});
+    fn update_stack_pointer(&mut self, new_sp: usize) -> Result<(), AccessError> {
+        if new_sp > self.max_stack_size {
+            return Err(AccessError::OutOfBounds {addr: self.stack_pointer, len: new_sp - self.stack_pointer});
+        } else if new_sp < self.stack_pointer {
+            for i in new_sp..self.stack_pointer + 1 { // +1 to account for sp == max_stack_size (?)
+                self.metadata[i] = MemState::ValidToReadWrite;
+            }
+        } else {
+            for i in self.stack_pointer..new_sp {
+                self.metadata[i] = MemState::Unallocated;
+            }
         }
-        for i in self.stack_pointer..self.stack_pointer + num_bytes {
-            self.metadata[i] = MemState::Unallocated;
-        }
-        self.stack_pointer = self.stack_pointer + num_bytes;
-        Ok(())
-    }
-    fn grow_stack(&mut self, num_bytes: usize) -> Result<(), AccessError> {
-        if self.stack_pointer < num_bytes {
-            return Err(AccessError::OutOfBounds {addr: self.stack_pointer, len: num_bytes});
-        }
-        for i in self.stack_pointer - num_bytes..self.stack_pointer {
-            self.metadata[i] = MemState::ValidToReadWrite;
-        }
-        self.stack_pointer = self.stack_pointer - num_bytes;
+        self.stack_pointer = new_sp;
         Ok(())
     }
 }
@@ -183,54 +194,55 @@ fn error_type() {
 }
 
 #[test]
-fn stack_grow_shrink_no_error() {
+fn update_sp_no_error() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
 
     assert_eq!(valgrind_state.max_stack_size, 1024);
-    assert!(valgrind_state.grow_stack(256).is_ok());
+    assert!(valgrind_state.update_stack_pointer(768).is_ok());
     assert_eq!(valgrind_state.stack_pointer, 768);
     assert!(valgrind_state.malloc(1024 * 2, 32).is_ok());
     assert!(valgrind_state.free(1024 * 2, 32).is_ok());
-    assert!(valgrind_state.shrink_stack(128).is_ok());
+    assert!(valgrind_state.update_stack_pointer(896).is_ok());
     assert_eq!(valgrind_state.stack_pointer, 896);
+    assert!(valgrind_state.update_stack_pointer(1024).is_ok());
 }
 
 #[test]
 fn bad_stack_malloc() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
 
-    assert!(valgrind_state.grow_stack(1024).is_ok());
+    assert!(valgrind_state.update_stack_pointer(0).is_ok());
     assert_eq!(valgrind_state.stack_pointer, 0);
     assert_eq!(valgrind_state.malloc(512, 32), Err(AccessError::OutOfBounds {addr: 512, len: 32}));
     assert_eq!(valgrind_state.malloc(1022, 32), Err(AccessError::OutOfBounds {addr: 1022, len: 32}));
 }
 
 #[test]
-fn bad_stack_access() {
+fn bad_stack_read_write() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
 
-    assert!(valgrind_state.grow_stack(512).is_ok());
+    assert!(valgrind_state.update_stack_pointer(512).is_ok());
     assert_eq!(valgrind_state.stack_pointer, 512);
-    assert_eq!(valgrind_state.read(256, 16), Err(AccessError::OutOfBounds {addr: 256, len: 16}));
-    assert_eq!(valgrind_state.write(500, 32), Err(AccessError::OutOfBounds {addr: 500, len: 32}));
+    assert_eq!(valgrind_state.read(256, 16), Err(AccessError::InvalidRead {addr: 256, len: 16}));
+    assert_eq!(valgrind_state.write(500, 32), Err(AccessError::InvalidWrite {addr: 500, len: 32}));
 }
 
 #[test]
-fn stack_overflow() {
+fn stack_full_empty() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
 
-    assert!(valgrind_state.grow_stack(512).is_ok());
-    assert_eq!(valgrind_state.grow_stack(524), Err(AccessError::OutOfBounds {addr: 512, len: 524}));
-    assert_eq!(valgrind_state.stack_pointer, 512);
-    assert_eq!(valgrind_state.read(256, 16), Err(AccessError::OutOfBounds {addr: 256, len: 16}));
-    assert_eq!(valgrind_state.write(500, 32), Err(AccessError::OutOfBounds {addr: 500, len: 32}));
+    assert!(valgrind_state.update_stack_pointer(0).is_ok());
+    assert_eq!(valgrind_state.stack_pointer, 0);
+    assert!(valgrind_state.update_stack_pointer(1024).is_ok());
+    assert_eq!(valgrind_state.stack_pointer, 1024)
 }
 
 #[test]
 fn stack_underflow() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
 
-    assert!(valgrind_state.grow_stack(32).is_ok());
-    assert_eq!(valgrind_state.shrink_stack(64), Err(AccessError::OutOfBounds {addr: 992, len: 64}));
-    assert_eq!(valgrind_state.stack_pointer, 992);
+    assert!(valgrind_state.update_stack_pointer(800).is_ok());
+    assert_eq!(valgrind_state.update_stack_pointer(1025), Err(AccessError::OutOfBounds {addr: 800, len: 225}));
+    assert_eq!(valgrind_state.update_stack_pointer(2000), Err(AccessError::OutOfBounds {addr: 800, len: 1200}));
+    assert_eq!(valgrind_state.stack_pointer, 800);
 }
