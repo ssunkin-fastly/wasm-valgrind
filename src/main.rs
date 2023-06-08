@@ -4,14 +4,14 @@ The following imploementation assumes that the stack sits at the bottom of memor
 
 use std::cmp::*;
 
-struct Valgrind {
+pub struct Valgrind {
     metadata: Vec<MemState>,
     stack_pointer: usize,
     max_stack_size: usize
 }
 
 #[derive(Debug, PartialEq)]
-enum AccessError {
+pub enum AccessError {
     DoubleMalloc {addr: usize, len: usize},
     InvalidRead {addr: usize, len: usize},
     InvalidWrite {addr: usize, len: usize},
@@ -20,7 +20,7 @@ enum AccessError {
 }
 
 #[derive(Clone)]
-enum MemState {
+pub enum MemState {
     Unallocated,
     ValidToWrite,
     ValidToReadWrite
