@@ -4,14 +4,14 @@ The following imploementation assumes that the stack sits at the bottom of memor
 
 use std::cmp::*;
 
-struct Valgrind {
+pub struct Valgrind {
     metadata: Vec<MemState>,
     stack_pointer: usize,
     max_stack_size: usize
 }
 
 #[derive(Debug, PartialEq)]
-enum AccessError {
+pub enum AccessError {
     DoubleMalloc {addr: usize, len: usize},
     InvalidRead {addr: usize, len: usize},
     InvalidWrite {addr: usize, len: usize},
@@ -20,7 +20,7 @@ enum AccessError {
 }
 
 #[derive(Clone)]
-enum MemState {
+pub enum MemState {
     Unallocated,
     ValidToWrite,
     ValidToReadWrite
@@ -33,7 +33,7 @@ impl Valgrind {
         Valgrind { metadata, stack_pointer, max_stack_size }
     }
     fn malloc(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
-        if !(self.is_in_bounds(addr, len) && self.max_stack_size < addr) {
+        if !self.is_in_bounds_heap(addr, len) {
             return Err(AccessError::OutOfBounds {addr: addr, len: len});
         }
         for i in addr..addr+len {
@@ -53,7 +53,7 @@ impl Valgrind {
         Ok(())
     }
     fn read(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
-        if !self.is_in_bounds(addr, len) {
+        if !(self.is_in_bounds_stack(addr, len) || self.is_in_bounds_heap(addr, len)) {
             return Err(AccessError::OutOfBounds {addr: addr, len: len});
         }
         for i in addr..addr+len {
@@ -70,7 +70,7 @@ impl Valgrind {
         Ok(())
     }
     fn write(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
-        if !self.is_in_bounds(addr, len) {
+        if !(self.is_in_bounds_stack(addr, len) || self.is_in_bounds_heap(addr, len)) {
             return Err(AccessError::OutOfBounds {addr: addr, len: len});
         }
         for i in addr..addr+len {
@@ -84,7 +84,7 @@ impl Valgrind {
         Ok(())
     }
     fn free(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
-        if !(self.is_in_bounds(addr, len) && self.max_stack_size < addr) {
+        if !(self.is_in_bounds_heap(addr, len)) {
             return Err(AccessError::OutOfBounds {addr: addr, len: len});
         }
         for i in addr..addr+len {
@@ -97,8 +97,11 @@ impl Valgrind {
         }
         Ok(())
     }
-    fn is_in_bounds(&self, addr: usize, len: usize) -> bool {
-        addr + len <= self.metadata.len() 
+    fn is_in_bounds_heap(&self, addr: usize, len: usize) -> bool {
+        self.max_stack_size < addr && addr + len <= self.metadata.len() 
+    }
+    fn is_in_bounds_stack(&self, addr: usize, len: usize) -> bool {
+        addr + len <= self.max_stack_size
     }
     fn update_stack_pointer(&mut self, new_sp: usize) -> Result<(), AccessError> {
         if new_sp > self.max_stack_size {
