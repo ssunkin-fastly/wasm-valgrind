@@ -7,9 +7,11 @@
 
 use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use std::collections::HashMap;
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
+    //constant memsize & max_stack_size for now
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
     let commands = CommandSequence::arbitrary(u)?; //not sure about this syntax
     for cmd in commands.iter() {
@@ -42,12 +44,43 @@ struct CommandSequence {
 }
 
 struct CommandSequenceState {
-    metadata: Vec<MemState>
+    // valid addresses ranges that have been allocated
+    // mapped to Vec of MemState for each byte in range
+    allocations: HashMap<(usize, usize), Vec<MemState>> // range [a, b)
 }
 
 impl CommandSequenceState {
-    fn new() {}
-    fn update(cmd: Command) {}
+    //fixed mem size for now
+    fn new() -> CommandSequenceState {
+        let memsize = 1024 * 640;
+        let mut allocations = HashMap::new();
+        CommandSequenceState { allocations }
+    }
+    fn update(&mut self, cmd: Command) {
+        match cmd {
+            Command::Malloc { addr, len } => {
+                //insert new entry
+                //set ValidToWrite
+                let range = (addr, addr+len);
+                let memstate_vec = vec![MemState::ValidToWrite, len];
+                self.allocations.insert(range, memstate_vec);
+            }
+            Command::Free { addr, len } => {
+                //delete entry
+                self.allocations.remove(&(addr, addr + len));
+            }
+            Command::Write { addr, len } => {
+                //set ValidToReadWrite
+                let alloc_range = self.allocations.keys().filter(|x| x.0 <= addr && addr < x.1).collect()[0]; // len(vec) should == 1
+                let alloc_start = alloc_range.0;
+                let write_data = self.allocations.entry(alloc_range); //pointer to memstate vec
+                let vec_index = addr - alloc_start;
+                for i in vec_index..vec_index + len {
+                    (*write_data)[i] = MemState::ValidToReadWrite;
+                }
+            }
+        }
+    }
  }
 
 impl<'a> Arbitrary<'a> for CommandSequence {
@@ -83,20 +116,15 @@ impl<'a> Arbitrary<'a> for CommandSequence {
     }
 }
 
-//left unimplemented for now
-fn pick_free_addr_range(state: &CommandSequenceState, u: &mut Arbitrary<'_>) -> Result<(u32, u32)> {}
-fn pick_mallocd_addr_range(state: &CommandSequenceState, u: &mut Arbitrary<'_>) -> Result<(u32, u32)> {}
-fn pick_valid_to_read(state: &CommandSequenceState, u: &mut Arbitrary<'_>) -> Result<(u32, u32)> {}
-
-
-
-/*
-questions:
-    if there are two mallocs that are right next to each other, retrieving size
-    of memory to free using this method will be inaccurate
-    is there metadata in heap that can be somehow accessed instead to determine size
-    of frees?
-    https://stackoverflow.com/questions/1518711/how-does-free-know-how-much-to-free
-
-
-*/
+fn pick_free_addr_range(state: &CommandSequenceState, u: &mut Arbitrary<'_>) -> Result<(u32, u32)> {
+    //does u.int_in_range() pick a new int if it's called multiple times
+    let addr = u.int_in_range(1025, 1024 * 640);
+    //if hashmap already contains 
+}
+fn pick_mallocd_addr_range(state: &CommandSequenceState, u: &mut Arbitrary<'_>) -> Result<(u32, u32)> {
+    //pick any entry in CommandSequenceState.allocations and return (addr, len(key_vec))
+}
+fn pick_valid_to_read(state: &CommandSequenceState, u: &mut Arbitrary<'_>) -> Result<(u32, u32)> {
+    //filter CommandSequenceState.allocations by which ones contain ValidToReadWrite data
+    //and choose allocation from filter result
+}
