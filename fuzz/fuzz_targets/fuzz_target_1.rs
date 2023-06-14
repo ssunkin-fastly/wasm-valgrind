@@ -1,114 +1,93 @@
 #![no_main]
 
-// mod main;
-// use crate::main::Valgrind;
-// use crate::main::MemState;
-//how to import Valgrind from main?
-
 use libfuzzer_sys::fuzz_target;
-use arbitrary::{Arbitrary, Unstructured};
-use std::collections::HashMap;
+use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured, Error};
+use wasm_valgrind::Valgrind;
 
 fuzz_target!(|data: &[u8]| {
-    let mut u = Unstructured::new(data);
-    //constant memsize & max_stack_size for now
+    let u = &mut Unstructured::new(data);
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
-    let commands = CommandSequence::arbitrary(u)?; //not sure about this syntax
-    for cmd in commands.iter() {
+    let cmds = match CommandSequence::arbitrary(u) {
+        Ok(val) => val,
+        Err(_) => return,
+    };
+    println!("{:?}", cmds);
+    for cmd in cmds.commands.iter() {
+        let cmd: &Command = cmd;
         match cmd {
-            Command::Malloc { addr, len } => {
+            &Command::Malloc { addr, len } => {
                 assert!(valgrind_state.malloc(addr, len).is_ok());
             }
-            Command::Free { addr, len } => {
+            &Command::Free { addr, len } => {
                 assert!(valgrind_state.free(addr, len).is_ok());
             }
-            Command::Read { addr, len } => {
+            &Command::Read { addr, len } => {
                 assert!(valgrind_state.read(addr, len).is_ok());
             }
-            Command::Write { addr, len } => {
+            &Command::Write { addr, len } => {
                 assert!(valgrind_state.write(addr, len).is_ok());
             }
         }
     }
 });
 
-enum Command {
+#[derive(Debug)]
+pub enum Command {
     Malloc {addr: usize, len: usize},
     Read {addr: usize, len: usize},
     Write {addr: usize, len: usize},
     Free {addr: usize, len: usize}
 }
 
-struct CommandSequence {
+#[derive(Debug)]
+pub struct CommandSequence {
     commands: Vec<Command>
 }
 
-struct CommandSequenceState {
-    // valid addresses ranges that have been allocated
-    // mapped to Vec of MemState for each byte in range
-    allocations: HashMap<(usize, usize), Vec<MemState>> // range [a, b)
+pub struct CommandSequenceState {
+    allocations: Vec<(usize, usize)> // (addr, len)
 }
 
 impl CommandSequenceState {
-    //fixed mem size for now
     fn new() -> CommandSequenceState {
-        let memsize = 1024 * 640;
-        let mut allocations = HashMap::new();
+        let allocations = Vec::new();
         CommandSequenceState { allocations }
     }
-    fn update(&mut self, cmd: Command) {
+    fn update(&mut self, cmd: &Command) {
         match cmd {
-            Command::Malloc { addr, len } => {
-                //insert new entry
-                //set ValidToWrite
-                let range = (addr, addr+len);
-                let memstate_vec = vec![MemState::ValidToWrite, len];
-                self.allocations.insert(range, memstate_vec);
+            &Command::Malloc { addr, len } => {
+                self.allocations.push((addr, len)); 
             }
-            Command::Free { addr, len } => {
-                //delete entry
-                self.allocations.remove(&(addr, addr + len));
+            &Command::Free { addr, len } => {
+                let index = self.allocations.iter().position(|x| *x == (addr, len)).unwrap(); // error if no dereference?
+                self.allocations.remove(index);
             }
-            Command::Write { addr, len } => {
-                //set ValidToReadWrite
-                let alloc_range = self.allocations.keys().filter(|x| x.0 <= addr && addr < x.1).collect()[0]; // len(vec) should == 1
-                let alloc_start = alloc_range.0;
-                let write_data = self.allocations.entry(alloc_range); //pointer to memstate vec
-                let vec_index = addr - alloc_start;
-                for i in vec_index..vec_index + len {
-                    (*write_data)[i] = MemState::ValidToReadWrite;
-                }
-            }
+            _ => {}
         }
     }
  }
 
 impl<'a> Arbitrary<'a> for CommandSequence {
-    fn arbitrary(u: Unstructured<'a>) -> Result<CommandSequence> {
+    fn arbitrary(u: &mut Unstructured<'a>) -> Result<CommandSequence, libfuzzer_sys::arbitrary::Error> {
         let mut commands = vec![];
         let mut state = CommandSequenceState::new();
         for _ in 0..u.arbitrary::<usize>()? {
-            let cmd = match u.int_in_range(0..=3)? {
+            let cmd = match u.int_in_range(0..=1)? {
                 0 => {
-                    let malloc_range = pick_free_addr_range(&state, &mut u)?;
-                    Command::Malloc { start: malloc_range.0, len: malloc_range.1 }
+                    let malloc_range = pick_free_addr_range(&state, u)?;
+                    Command::Malloc { addr: malloc_range.0, len: malloc_range.1 }
                 }
                 1 => {
-                    //free
-                    let unalloc_range = pick_mallocd_addr_range(&state, &mut u)?;
-                    Command::Free { start: unalloc_range.0, len: unalloc_range.1 }
+                    // let unalloc_range = pick_mallocd_addr_range(&state, &mut u)?;
+                    let unalloc_index = u.choose_index(state.allocations.len())?;
+                    let unalloc_range = state.allocations[unalloc_index];
+                    Command::Free { addr: unalloc_range.0, len: unalloc_range.1 }
                 }
-                2 => {
-                    //read
-                    let read_range = pick_valid_to_read(&state, &mut u)?;
-                    Command::Read { start: read_range.0, len: read_range.1 }
-                }
-                3 => {
-                    //write
-                    let write_range = pick_mallocd_addr_range(&state, &mut u)?;
-                    Command::Write { start: write_range.0, len: write_range.1}
+                _ => {
+                    unreachable!()
                 }
             };
+            println!("{:?} {:?}", cmd, state.allocations);
             state.update(&cmd);
             commands.push(cmd);
         }
@@ -116,15 +95,39 @@ impl<'a> Arbitrary<'a> for CommandSequence {
     }
 }
 
-fn pick_free_addr_range(state: &CommandSequenceState, u: &mut Arbitrary<'_>) -> Result<(u32, u32)> {
-    //does u.int_in_range() pick a new int if it's called multiple times
-    let addr = u.int_in_range(1025, 1024 * 640);
-    //if hashmap already contains 
+//theres a problem here...
+fn pick_free_addr_range(state: &CommandSequenceState, u: &mut Unstructured<'_>) -> Result<(usize, usize), Error> {
+    let max_addr = 1024 * 640 - 1;
+    let mut addr = u.int_in_range(1025..=max_addr)?;
+    let mut attempts = 0;
+    while is_addr_allocated(state, addr) {
+        addr = u.int_in_range(1025..=max_addr)?;
+        attempts += 1;
+        if attempts == 10 {
+            return Err(Error::NotEnoughData);
+        }
+    }
+    let mut len = 1;
+    if max_addr - addr > 1 {
+        len = u.int_in_range(1..=max_addr - addr)?;
+    }
+    attempts = 0;
+    while !any_allocs_in_range(state, addr, addr + len) {
+        if max_addr - addr > 1 {
+            len = u.int_in_range(1..=max_addr - addr)?;
+        }
+        attempts += 1;
+        if attempts == 10 {
+            return Err(Error::NotEnoughData);
+        }
+    }
+    Ok((addr, len))
 }
-fn pick_mallocd_addr_range(state: &CommandSequenceState, u: &mut Arbitrary<'_>) -> Result<(u32, u32)> {
-    //pick any entry in CommandSequenceState.allocations and return (addr, len(key_vec))
+
+fn is_addr_allocated(state: &CommandSequenceState, addr: usize) -> bool {
+    state.allocations.iter().any(|x| x.0 <= addr && addr < x.0 + x.1)
 }
-fn pick_valid_to_read(state: &CommandSequenceState, u: &mut Arbitrary<'_>) -> Result<(u32, u32)> {
-    //filter CommandSequenceState.allocations by which ones contain ValidToReadWrite data
-    //and choose allocation from filter result
+
+fn any_allocs_in_range(state: &CommandSequenceState, start: usize, end: usize) -> bool {
+    state.allocations.iter().all(|x| (start < x.0 && end < x.0) || (start > x.0 + x.1 && end > x.0 + x.1))
 }

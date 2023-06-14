@@ -11,7 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = { version = "0.4.0", features = ["arbitrary-derive"] }
 rand="0.3.14"
 
-[dependencies.wasm-valgrind]
+[dependencies.wasm_valgrind]
 path = ".."
 
 # Prevent this from interfering with workspaces

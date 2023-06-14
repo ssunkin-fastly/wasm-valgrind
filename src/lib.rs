@@ -27,7 +27,7 @@ pub enum MemState {
 }
 
 impl Valgrind {
-    fn new(mem_size: usize, max_stack_size: usize) -> Valgrind {
+    pub fn new(mem_size: usize, max_stack_size: usize) -> Valgrind {
         let metadata = vec![MemState::Unallocated; mem_size];
         let stack_pointer = max_stack_size;
         Valgrind {
@@ -36,7 +36,7 @@ impl Valgrind {
             max_stack_size,
         }
     }
-    fn malloc(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
+    pub fn malloc(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
         if !(self.is_in_bounds(addr, len) && self.max_stack_size < addr) {
             return Err(AccessError::OutOfBounds {
                 addr: addr,
@@ -65,7 +65,7 @@ impl Valgrind {
         }
         Ok(())
     }
-    fn read(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
+    pub fn read(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
         if !self.is_in_bounds(addr, len) {
             return Err(AccessError::OutOfBounds {
                 addr: addr,
@@ -91,7 +91,7 @@ impl Valgrind {
         }
         Ok(())
     }
-    fn write(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
+    pub fn write(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
         if !self.is_in_bounds(addr, len) {
             return Err(AccessError::OutOfBounds {
                 addr: addr,
@@ -111,7 +111,7 @@ impl Valgrind {
         }
         Ok(())
     }
-    fn free(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
+    pub fn free(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
         if !(self.is_in_bounds(addr, len) && self.max_stack_size < addr) {
             return Err(AccessError::OutOfBounds {
                 addr: addr,
