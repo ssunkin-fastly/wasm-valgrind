@@ -78,7 +78,6 @@ impl<'a> Arbitrary<'a> for CommandSequence {
                     Command::Malloc { addr: malloc_range.0, len: malloc_range.1 }
                 }
                 1 => {
-                    // let unalloc_range = pick_mallocd_addr_range(&state, &mut u)?;
                     let unalloc_index = u.choose_index(state.allocations.len())?;
                     let unalloc_range = state.allocations[unalloc_index];
                     Command::Free { addr: unalloc_range.0, len: unalloc_range.1 }
