@@ -18,8 +18,8 @@ fuzz_target!(|data: &[u8]| {
             &Command::Malloc { addr, len } => {
                 assert!(valgrind_state.malloc(addr, len).is_ok());
             }
-            &Command::Free { addr, len } => {
-                assert!(valgrind_state.free(addr, len).is_ok());
+            &Command::Free { addr } => {
+                assert!(valgrind_state.free(addr).is_ok());
             }
             &Command::Read { addr, len } => {
                 assert!(valgrind_state.read(addr, len).is_ok());
@@ -36,7 +36,7 @@ pub enum Command {
     Malloc {addr: usize, len: usize},
     Read {addr: usize, len: usize},
     Write {addr: usize, len: usize},
-    Free {addr: usize, len: usize}
+    Free {addr: usize}
 }
 
 #[derive(Debug)]
@@ -58,8 +58,8 @@ impl CommandSequenceState {
             &Command::Malloc { addr, len } => {
                 self.allocations.push((addr, len)); 
             }
-            &Command::Free { addr, len } => {
-                let index = self.allocations.iter().position(|x| *x == (addr, len)).unwrap(); // error if no dereference?
+            &Command::Free { addr } => {
+                let index = self.allocations.iter().position(|(x, _)| *x == addr).unwrap(); // error if no dereference?
                 self.allocations.remove(index);
             }
             _ => {}
@@ -80,7 +80,7 @@ impl<'a> Arbitrary<'a> for CommandSequence {
                 1 => {
                     let unalloc_index = u.choose_index(state.allocations.len())?;
                     let unalloc_range = state.allocations[unalloc_index];
-                    Command::Free { addr: unalloc_range.0, len: unalloc_range.1 }
+                    Command::Free { addr: unalloc_range.0 }
                 }
                 _ => {
                     unreachable!()
