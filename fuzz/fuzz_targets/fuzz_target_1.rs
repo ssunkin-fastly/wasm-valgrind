@@ -59,7 +59,7 @@ impl CommandSequenceState {
                 self.allocations.push((addr, len)); 
             }
             &Command::Free { addr } => {
-                let index = self.allocations.iter().position(|(x, _)| *x == addr).unwrap(); // error if no dereference?
+                let index = self.allocations.iter().position(|(x, _)| *x == addr).unwrap();
                 self.allocations.remove(index);
             }
             _ => {}
@@ -79,8 +79,8 @@ impl<'a> Arbitrary<'a> for CommandSequence {
                 }
                 1 => {
                     let unalloc_index = u.choose_index(state.allocations.len())?;
-                    let unalloc_range = state.allocations[unalloc_index];
-                    Command::Free { addr: unalloc_range.0 }
+                    let unalloc_addr = state.allocations[unalloc_index].0;
+                    Command::Free { addr: unalloc_addr }
                 }
                 _ => {
                     unreachable!()
@@ -111,7 +111,7 @@ fn pick_free_addr_range(state: &CommandSequenceState, u: &mut Unstructured<'_>) 
         len = u.int_in_range(1..=max_addr - addr)?;
     }
     attempts = 0;
-    while !any_allocs_in_range(state, addr, addr + len) {
+    while !no_allocs_in_range(state, addr, addr + len) {
         if max_addr - addr > 1 {
             len = u.int_in_range(1..=max_addr - addr)?;
         }
@@ -127,6 +127,6 @@ fn is_addr_allocated(state: &CommandSequenceState, addr: usize) -> bool {
     state.allocations.iter().any(|x| x.0 <= addr && addr < x.0 + x.1)
 }
 
-fn any_allocs_in_range(state: &CommandSequenceState, start: usize, end: usize) -> bool {
-    state.allocations.iter().all(|x| (start < x.0 && end < x.0) || (start > x.0 + x.1 && end > x.0 + x.1))
+fn no_allocs_in_range(state: &CommandSequenceState, start: usize, end: usize) -> bool {
+    state.allocations.iter().all(|x| (start < x.0 && end < x.0) || (start > x.0 + x.1 - 1 && end > x.0 + x.1 - 1))
 }
