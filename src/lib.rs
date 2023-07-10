@@ -9,7 +9,8 @@ pub struct Valgrind {
     metadata: Vec<MemState>,
     mallocs: HashMap<usize, usize>, // start addr, len
     stack_pointer: usize,
-    max_stack_size: usize
+    max_stack_size: usize,
+    //flag: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -106,10 +107,10 @@ impl Valgrind {
         Ok(())
     }
     fn is_in_bounds_heap(&self, addr: usize, len: usize) -> bool {
-        self.max_stack_size < addr && addr + len <= self.metadata.len() 
+        self.max_stack_size <= addr && addr + len <= self.metadata.len() 
     }
     fn is_in_bounds_stack(&self, addr: usize, len: usize) -> bool {
-        addr + len <= self.max_stack_size
+        addr + len < self.max_stack_size
     }
     pub fn update_stack_pointer(&mut self, new_sp: usize) -> Result<(), AccessError> {
         if new_sp > self.max_stack_size {

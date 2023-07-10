@@ -22,7 +22,13 @@ members = ["."]
 debug = 1
 
 [[bin]]
-name = "fuzz_target_1"
-path = "fuzz_targets/fuzz_target_1.rs"
+name = "valid_accesses"
+path = "fuzz_targets/valid_accesses.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "buggy_accesses"
+path = "fuzz_targets/buggy_accesses.rs"
 test = false
 doc = false

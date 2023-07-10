@@ -4,6 +4,9 @@ use libfuzzer_sys::fuzz_target;
 use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured, Error};
 use wasm_valgrind::Valgrind;
 
+const TEST_MAX_ADDR: usize = 1024 * 640 - 1;
+const TEST_MAX_STACK_SIZE: usize = 1024;
+
 fuzz_target!(|data: &[u8]| {
     let u = &mut Unstructured::new(data);
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
@@ -41,11 +44,11 @@ pub enum Command {
 
 #[derive(Debug)]
 pub struct CommandSequence {
-    commands: Vec<Command>
+    commands: Vec<Command>,
 }
 
 pub struct CommandSequenceState {
-    allocations: Vec<(usize, usize)> // (addr, len)
+    allocations: Vec<(usize, usize)>, // (addr, len)
 }
 
 impl CommandSequenceState {
@@ -61,6 +64,19 @@ impl CommandSequenceState {
             &Command::Free { addr } => {
                 let index = self.allocations.iter().position(|(x, _)| *x == addr).unwrap();
                 self.allocations.remove(index);
+            }
+            &Command::Write { addr, len } => {
+                let index = self.allocations.iter().position(|(x, y)| *x <= addr && addr <= *y).unwrap();
+                let write_to = self.allocations[index];
+                /*
+                ideas for how to change CommandsequenceState
+                1. Add a new struct field that's read-write ok sections (might get complicated if they overlap)
+                2. Each allocation is mapped to a list of ranges in which read-write is ok; merging/refactoring
+                    these ranges could be tricky
+                3. Each alloc is mapped to a dict of allocs that are either write only or read-write ok
+                    - loop thru the allocs in a dict are for read/writes: read to check that all are read-write ok,
+                      write to set given indices to read-write ok
+                */
             }
             _ => {}
         }
@@ -94,26 +110,24 @@ impl<'a> Arbitrary<'a> for CommandSequence {
     }
 }
 
-//theres a problem here...
 fn pick_free_addr_range(state: &CommandSequenceState, u: &mut Unstructured<'_>) -> Result<(usize, usize), Error> {
-    let max_addr = 1024 * 640 - 1;
-    let mut addr = u.int_in_range(1025..=max_addr)?;
+    let mut addr = u.int_in_range(1024..=TEST_MAX_ADDR)?;
     let mut attempts = 0;
     while is_addr_allocated(state, addr) {
-        addr = u.int_in_range(1025..=max_addr)?;
+        addr = u.int_in_range(1025..=TEST_MAX_ADDR)?;
         attempts += 1;
         if attempts == 10 {
             return Err(Error::NotEnoughData);
         }
     }
     let mut len = 1;
-    if max_addr - addr > 1 {
-        len = u.int_in_range(1..=max_addr - addr)?;
+    if TEST_MAX_ADDR - addr > 1 {
+        len = u.int_in_range(1..=TEST_MAX_ADDR - addr)?;
     }
     attempts = 0;
     while !no_allocs_in_range(state, addr, addr + len) {
-        if max_addr - addr > 1 {
-            len = u.int_in_range(1..=max_addr - addr)?;
+        if TEST_MAX_ADDR - addr > 1 {
+            len = u.int_in_range(1..=TEST_MAX_ADDR - addr)?;
         }
         attempts += 1;
         if attempts == 10 {
@@ -128,5 +142,5 @@ fn is_addr_allocated(state: &CommandSequenceState, addr: usize) -> bool {
 }
 
 fn no_allocs_in_range(state: &CommandSequenceState, start: usize, end: usize) -> bool {
-    state.allocations.iter().all(|x| (start < x.0 && end < x.0) || (start > x.0 + x.1 - 1 && end > x.0 + x.1 - 1))
+    state.allocations.iter().all(|x| (start < x.0 && end < x.0) || (start >= x.0 + x.1 && end >= x.0 + x.1))
 }

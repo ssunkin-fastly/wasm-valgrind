@@ -1,10 +1,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured, Error};
+use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
 use wasm_valgrind::Valgrind;
 use wasm_valgrind::AccessError;
-// use fuzz_targets::fuzz_target_1::{Command};
+
+const TEST_MAX_ADDR: usize = 1024 * 640 - 1;
+const TEST_MAX_STACK_SIZE: usize = 1024;
 
 fuzz_target!(|data: &[u8]| {
     let u = &mut Unstructured::new(data);
@@ -48,7 +50,23 @@ struct BuggyCommandSequence {
 }
 
 struct BuggyCommandSequenceState {
-    allocations: Vec<(usize, usize)>, // addr, len
+    allocations: Vec<Allocation>,
+}
+
+#[derive(Debug)]
+pub struct Allocation {
+    addr: usize,
+    len: usize,
+}
+//model the stack as an allocation
+
+impl Allocation {
+    fn no_overlaps(&self, other: &Allocation) -> bool {
+        other.addr + other.len <= self.addr || self.addr + self.len <= other.addr 
+    }
+    fn is_in_bounds(&self) -> bool {
+        TEST_MAX_STACK_SIZE <= self.addr && self.addr + self.len - 1 <= TEST_MAX_ADDR
+    }
 }
 
 impl BuggyCommandSequenceState {
@@ -59,16 +77,16 @@ impl BuggyCommandSequenceState {
     fn update(&mut self, cmd: &Command) {
         match cmd {
             &Command::Malloc { addr, len } => {
-                let validity = is_malloc_valid(addr, len, &self);
-                println!("malloc is valid? {}", validity.is_ok());
+                let alloc = Allocation { addr, len };
+                let validity = is_malloc_valid(&alloc, &self);
                 if validity.is_ok() {
-                    self.allocations.push((addr, len));
+                    self.allocations.push(Allocation { addr, len });
                 }
             }
             &Command::Free { addr } => {
                 let validity = is_free_valid(addr, &self);
-                if validity == Ok(()) {
-                    let index = self.allocations.iter().position(|x| x.0 == addr).unwrap(); // error if no dereference?
+                if validity.is_ok() {
+                    let index = self.allocations.iter().position(|alloc| alloc.addr == addr).unwrap();
                     self.allocations.remove(index);
                 }
             }
@@ -80,26 +98,26 @@ impl BuggyCommandSequenceState {
 
 impl<'a> Arbitrary<'a> for BuggyCommandSequence {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<BuggyCommandSequence, libfuzzer_sys::arbitrary::Error> {
-        let max_addr = 1024 * 640 - 1;
         let mut commands = vec![];
         let mut results = vec![];
         let mut state = BuggyCommandSequenceState::new();
         for _ in 0..u.int_in_range(1..=20)? {
             let cmd = match u.int_in_range(0..=1)? {
                 0 => {
-                    let malloc_addr = u.int_in_range(1..=max_addr)?;
-                    let malloc_len = u.int_in_range(1..=max_addr)?;
-                    results.push(is_malloc_valid(malloc_addr, malloc_len, &state));
+                    let malloc_addr = u.int_in_range(1..=TEST_MAX_ADDR)?;
+                    let malloc_len = u.int_in_range(1..=TEST_MAX_ADDR)?;
+                    let alloc = Allocation { addr: malloc_addr, len: malloc_len };
+                    results.push(is_malloc_valid(&alloc, &state));
                     Command::Malloc { addr: malloc_addr, len: malloc_len }
                 }
                 1 => {
                     let choose_rand_addr = u.ratio(1, 2)?;
                     let mut unalloc_addr = 0;
                     if choose_rand_addr {
-                        unalloc_addr = u.choose_index(max_addr)?;
+                        unalloc_addr = u.choose_index(TEST_MAX_ADDR)?;
                     } else {
                         let some_alloc = u.choose_index(state.allocations.len())?;
-                        unalloc_addr = state.allocations[some_alloc].0;
+                        unalloc_addr = state.allocations[some_alloc].addr;
                     }
                     results.push(is_free_valid(unalloc_addr, &state));
                     Command::Free { addr: unalloc_addr }
@@ -116,30 +134,22 @@ impl<'a> Arbitrary<'a> for BuggyCommandSequence {
     }
 }
 
-fn no_allocs_in_range(state: &BuggyCommandSequenceState, start: usize, end: usize) -> bool {
-    let ret = state.allocations.iter().all(|x| (start < x.0 && end < x.0) || (start > x.0 + x.1 - 1 && end > x.0 + x.1 - 1));
-    println!("no allocs in range? {}", ret);
-    return ret;
+fn no_allocs_in_range(state: &BuggyCommandSequenceState, other: &Allocation ) -> bool {
+    state.allocations.iter().all(|alloc| alloc.no_overlaps(other))
 }
 
-fn is_malloc_valid(addr: usize, len: usize, state: &BuggyCommandSequenceState) -> Result<(), AccessError> {
-    let max_addr = 1024 * 640 - 1;
-    let max_stack_size = 1024;
-    let is_in_bounds = max_stack_size < addr && addr + len - 1 <= max_addr;
-    println!("malloc in bounds? {}", is_in_bounds);
-    if !is_in_bounds {
-        return Err(AccessError::OutOfBounds { addr, len });
-    } else if !no_allocs_in_range(&state, addr, addr + len - 1) {
-        return Err(AccessError::DoubleMalloc { addr, len });
+fn is_malloc_valid(alloc: &Allocation, state: &BuggyCommandSequenceState) -> Result<(), AccessError> {
+    if !alloc.is_in_bounds() {
+        return Err(AccessError::OutOfBounds { addr: alloc.addr, len: alloc.len });
+    } else if !no_allocs_in_range(&state, &alloc) {
+        return Err(AccessError::DoubleMalloc { addr: alloc.addr, len: alloc.len });
     } else {
         return Ok(());
     }
 }
 
 fn is_free_valid(addr: usize, state: &BuggyCommandSequenceState) -> Result<(), AccessError> {
-    let max_addr = 1024 * 640 - 1;
-    let max_stack_size = 1024;
-    if !state.allocations.iter().any(|(alloc_addr, _)| *alloc_addr == addr) {
+    if !state.allocations.iter().any(|alloc| alloc.addr == addr) {
         return Err(AccessError::InvalidFree { addr });
     } else { 
         return Ok(());
