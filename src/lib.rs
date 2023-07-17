@@ -22,7 +22,7 @@ pub enum AccessError {
     OutOfBounds {addr: usize, len: usize}
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum MemState {
     Unallocated,
     ValidToWrite,

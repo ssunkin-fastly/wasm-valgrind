@@ -10,7 +10,7 @@ const TEST_MAX_STACK_SIZE: usize = 1024;
 
 fuzz_target!(|data: &[u8]| {
     let u = &mut Unstructured::new(data);
-    let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
+    let mut valgrind_state = Valgrind::new(TEST_MAX_ADDR + 1, TEST_MAX_STACK_SIZE);
     let cmds = match BuggyCommandSequence::arbitrary(u) {
         Ok(val) => val,
         Err(_) => return,
@@ -36,6 +36,21 @@ fuzz_target!(|data: &[u8]| {
 });
 
 #[derive(Debug)]
+pub struct Allocation {
+    addr: usize,
+    len: usize,
+} //TODO: model the stack as an allocation
+
+impl Allocation {
+    fn no_overlaps(&self, other: &Allocation) -> bool {
+        other.addr + other.len <= self.addr || self.addr + self.len <= other.addr 
+    }
+    fn is_in_bounds(&self) -> bool {
+        TEST_MAX_STACK_SIZE <= self.addr && self.addr + self.len - 1 <= TEST_MAX_ADDR
+    }
+}
+
+#[derive(Debug)]
 pub enum Command {
     Malloc {addr: usize, len: usize},
     Read {addr: usize, len: usize},
@@ -51,22 +66,6 @@ struct BuggyCommandSequence {
 
 struct BuggyCommandSequenceState {
     allocations: Vec<Allocation>,
-}
-
-#[derive(Debug)]
-pub struct Allocation {
-    addr: usize,
-    len: usize,
-}
-//model the stack as an allocation
-
-impl Allocation {
-    fn no_overlaps(&self, other: &Allocation) -> bool {
-        other.addr + other.len <= self.addr || self.addr + self.len <= other.addr 
-    }
-    fn is_in_bounds(&self) -> bool {
-        TEST_MAX_STACK_SIZE <= self.addr && self.addr + self.len - 1 <= TEST_MAX_ADDR
-    }
 }
 
 impl BuggyCommandSequenceState {
