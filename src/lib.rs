@@ -15,18 +15,18 @@ pub struct Valgrind {
 
 #[derive(Debug, PartialEq)]
 pub enum AccessError {
-    DoubleMalloc {addr: usize, len: usize},
-    InvalidRead {addr: usize, len: usize},
-    InvalidWrite {addr: usize, len: usize},
-    InvalidFree {addr: usize},
-    OutOfBounds {addr: usize, len: usize}
+    DoubleMalloc { addr: usize, len: usize },
+    InvalidRead { addr: usize, len: usize },
+    InvalidWrite { addr: usize, len: usize },
+    InvalidFree { addr: usize },
+    OutOfBounds { addr: usize, len: usize },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MemState {
     Unallocated,
     ValidToWrite,
-    ValidToReadWrite
+    ValidToReadWrite,
 }
 
 impl Valgrind {
@@ -34,24 +34,38 @@ impl Valgrind {
         let metadata = vec![MemState::Unallocated; mem_size];
         let mallocs = HashMap::new();
         let stack_pointer = max_stack_size;
-        Valgrind { metadata, mallocs, stack_pointer, max_stack_size }
+        Valgrind {
+            metadata,
+            mallocs,
+            stack_pointer,
+            max_stack_size,
+        }
     }
     pub fn malloc(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
         if !self.is_in_bounds_heap(addr, len) {
-            return Err(AccessError::OutOfBounds {addr: addr, len: len});
+            return Err(AccessError::OutOfBounds {
+                addr: addr,
+                len: len,
+            });
         }
-        for i in addr..addr+len {
+        for i in addr..addr + len {
             match self.metadata[i] {
                 MemState::ValidToWrite => {
-                    return Err(AccessError::DoubleMalloc {addr: addr, len: len});
+                    return Err(AccessError::DoubleMalloc {
+                        addr: addr,
+                        len: len,
+                    });
                 }
                 MemState::ValidToReadWrite => {
-                    return Err(AccessError::DoubleMalloc {addr: addr, len: len});
+                    return Err(AccessError::DoubleMalloc {
+                        addr: addr,
+                        len: len,
+                    });
                 }
                 _ => {}
             }
         }
-        for i in addr..addr+len {
+        for i in addr..addr + len {
             self.metadata[i] = MemState::ValidToWrite;
         }
         self.mallocs.insert(addr, len);
@@ -59,15 +73,24 @@ impl Valgrind {
     }
     pub fn read(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
         if !(self.is_in_bounds_stack(addr, len) || self.is_in_bounds_heap(addr, len)) {
-            return Err(AccessError::OutOfBounds {addr: addr, len: len});
+            return Err(AccessError::OutOfBounds {
+                addr: addr,
+                len: len,
+            });
         }
-        for i in addr..addr+len {
+        for i in addr..addr + len {
             match self.metadata[i] {
                 MemState::Unallocated => {
-                    return Err(AccessError::InvalidRead {addr: addr, len: len});
+                    return Err(AccessError::InvalidRead {
+                        addr: addr,
+                        len: len,
+                    });
                 }
                 MemState::ValidToWrite => {
-                    return Err(AccessError::InvalidRead {addr: addr, len: len});
+                    return Err(AccessError::InvalidRead {
+                        addr: addr,
+                        len: len,
+                    });
                 }
                 _ => {}
             }
@@ -76,47 +99,55 @@ impl Valgrind {
     }
     pub fn write(&mut self, addr: usize, len: usize) -> Result<(), AccessError> {
         if !(self.is_in_bounds_stack(addr, len) || self.is_in_bounds_heap(addr, len)) {
-            return Err(AccessError::OutOfBounds {addr: addr, len: len});
+            return Err(AccessError::OutOfBounds {
+                addr: addr,
+                len: len,
+            });
         }
-        for i in addr..addr+len {
+        for i in addr..addr + len {
             if let MemState::Unallocated = self.metadata[i] {
-                return Err(AccessError::InvalidWrite {addr: addr, len: len});
+                return Err(AccessError::InvalidWrite {
+                    addr: addr,
+                    len: len,
+                });
             }
         }
-        for i in addr..addr+len {
+        for i in addr..addr + len {
             self.metadata[i] = MemState::ValidToReadWrite;
         }
         Ok(())
     }
     pub fn free(&mut self, addr: usize) -> Result<(), AccessError> {
-        // removed the len argument for free
-        // removed out of bounds error because free no longer has length
         if !self.mallocs.contains_key(&addr) {
-            return Err(AccessError::InvalidFree {addr: addr})
+            return Err(AccessError::InvalidFree { addr: addr });
         }
         let len = self.mallocs[&addr];
-        for i in addr..addr+len {
+        for i in addr..addr + len {
             if let MemState::Unallocated = self.metadata[i] {
-                return Err(AccessError::InvalidFree {addr: addr});
+                return Err(AccessError::InvalidFree { addr: addr });
             }
         }
         self.mallocs.remove(&addr);
-        for i in addr..addr+len {
+        for i in addr..addr + len {
             self.metadata[i] = MemState::Unallocated;
         }
         Ok(())
     }
     fn is_in_bounds_heap(&self, addr: usize, len: usize) -> bool {
-        self.max_stack_size <= addr && addr + len <= self.metadata.len() 
+        self.max_stack_size <= addr && addr + len <= self.metadata.len()
     }
     fn is_in_bounds_stack(&self, addr: usize, len: usize) -> bool {
-        addr + len < self.max_stack_size
+        self.stack_pointer <= addr && addr + len < self.max_stack_size
     }
     pub fn update_stack_pointer(&mut self, new_sp: usize) -> Result<(), AccessError> {
         if new_sp > self.max_stack_size {
-            return Err(AccessError::OutOfBounds {addr: self.stack_pointer, len: new_sp - self.stack_pointer});
+            return Err(AccessError::OutOfBounds {
+                addr: self.stack_pointer,
+                len: new_sp - self.stack_pointer,
+            });
         } else if new_sp < self.stack_pointer {
-            for i in new_sp..self.stack_pointer + 1 { // +1 to account for sp == max_stack_size (?)
+            for i in new_sp..self.stack_pointer + 1 {
+                // +1 to account for sp == max_stack_size (?)
                 self.metadata[i] = MemState::ValidToReadWrite;
             }
         } else {
@@ -146,7 +177,13 @@ fn read_before_initializing() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 0);
 
     assert!(valgrind_state.malloc(0x1000, 32).is_ok());
-    assert_eq!(valgrind_state.read(0x1000, 4), Err(AccessError::InvalidRead {addr: 0x1000, len: 4}));
+    assert_eq!(
+        valgrind_state.read(0x1000, 4),
+        Err(AccessError::InvalidRead {
+            addr: 0x1000,
+            len: 4
+        })
+    );
     assert!(valgrind_state.write(0x1000, 4).is_ok());
     assert!(valgrind_state.free(0x1000).is_ok());
 }
@@ -159,9 +196,14 @@ fn use_after_free() {
     assert!(valgrind_state.write(0x1000, 4).is_ok());
     assert!(valgrind_state.write(0x1000, 4).is_ok());
     assert!(valgrind_state.free(0x1000).is_ok());
-    assert_eq!(valgrind_state.write(0x1000, 4), Err(AccessError::InvalidWrite {addr: 0x1000, len: 4}));
+    assert_eq!(
+        valgrind_state.write(0x1000, 4),
+        Err(AccessError::InvalidWrite {
+            addr: 0x1000,
+            len: 4
+        })
+    );
 }
-
 
 #[test]
 fn double_free() {
@@ -170,15 +212,30 @@ fn double_free() {
     assert!(valgrind_state.malloc(0x1000, 32).is_ok());
     assert!(valgrind_state.write(0x1000, 4).is_ok());
     assert!(valgrind_state.free(0x1000).is_ok());
-    assert_eq!(valgrind_state.free(0x1000), Err(AccessError::InvalidFree {addr: 0x1000}));
+    assert_eq!(
+        valgrind_state.free(0x1000),
+        Err(AccessError::InvalidFree { addr: 0x1000 })
+    );
 }
 
 #[test]
 fn out_of_bounds_malloc() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 0);
 
-    assert_eq!(valgrind_state.malloc(640 * 1024, 1), Err(AccessError::OutOfBounds {addr: 640 * 1024, len: 1}));
-    assert_eq!(valgrind_state.malloc(640 * 1024 - 10, 15), Err(AccessError::OutOfBounds {addr: 640 * 1024 - 10, len: 15}));
+    assert_eq!(
+        valgrind_state.malloc(640 * 1024, 1),
+        Err(AccessError::OutOfBounds {
+            addr: 640 * 1024,
+            len: 1
+        })
+    );
+    assert_eq!(
+        valgrind_state.malloc(640 * 1024 - 10, 15),
+        Err(AccessError::OutOfBounds {
+            addr: 640 * 1024 - 10,
+            len: 15
+        })
+    );
     assert!(valgrind_state.mallocs.is_empty());
 }
 
@@ -187,7 +244,13 @@ fn out_of_bounds_read() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 0);
 
     assert!(valgrind_state.malloc(640 * 1024 - 24, 24).is_ok());
-    assert_eq!(valgrind_state.read(640 * 1024 - 24, 25), Err(AccessError::OutOfBounds {addr: 640 * 1024 - 24, len: 25}));
+    assert_eq!(
+        valgrind_state.read(640 * 1024 - 24, 25),
+        Err(AccessError::OutOfBounds {
+            addr: 640 * 1024 - 24,
+            len: 25
+        })
+    );
 }
 
 #[test]
@@ -195,8 +258,20 @@ fn double_malloc() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 0);
 
     assert!(valgrind_state.malloc(0x1000, 32).is_ok());
-    assert_eq!(valgrind_state.malloc(0x1000, 32), Err(AccessError::DoubleMalloc {addr: 0x1000, len: 32}));
-    assert_eq!(valgrind_state.malloc(0x1002, 32), Err(AccessError::DoubleMalloc {addr: 0x1002, len: 32}));
+    assert_eq!(
+        valgrind_state.malloc(0x1000, 32),
+        Err(AccessError::DoubleMalloc {
+            addr: 0x1000,
+            len: 32
+        })
+    );
+    assert_eq!(
+        valgrind_state.malloc(0x1002, 32),
+        Err(AccessError::DoubleMalloc {
+            addr: 0x1002,
+            len: 32
+        })
+    );
     assert!(valgrind_state.free(0x1000).is_ok());
 }
 
@@ -205,8 +280,20 @@ fn error_type() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 0);
 
     assert!(valgrind_state.malloc(0x1000, 32).is_ok());
-    assert_eq!(valgrind_state.malloc(0x1000, 32), Err(AccessError::DoubleMalloc {addr: 0x1000, len: 32}));
-    assert_eq!(valgrind_state.malloc(640 * 1024, 32), Err(AccessError::OutOfBounds {addr: 640 * 1024, len: 32}));
+    assert_eq!(
+        valgrind_state.malloc(0x1000, 32),
+        Err(AccessError::DoubleMalloc {
+            addr: 0x1000,
+            len: 32
+        })
+    );
+    assert_eq!(
+        valgrind_state.malloc(640 * 1024, 32),
+        Err(AccessError::OutOfBounds {
+            addr: 640 * 1024,
+            len: 32
+        })
+    );
     assert!(valgrind_state.free(0x1000).is_ok());
 }
 
@@ -230,8 +317,17 @@ fn bad_stack_malloc() {
 
     assert!(valgrind_state.update_stack_pointer(0).is_ok());
     assert_eq!(valgrind_state.stack_pointer, 0);
-    assert_eq!(valgrind_state.malloc(512, 32), Err(AccessError::OutOfBounds {addr: 512, len: 32}));
-    assert_eq!(valgrind_state.malloc(1022, 32), Err(AccessError::OutOfBounds {addr: 1022, len: 32}));
+    assert_eq!(
+        valgrind_state.malloc(512, 32),
+        Err(AccessError::OutOfBounds { addr: 512, len: 32 })
+    );
+    assert_eq!(
+        valgrind_state.malloc(1022, 32),
+        Err(AccessError::OutOfBounds {
+            addr: 1022,
+            len: 32
+        })
+    );
 }
 
 #[test]
@@ -240,8 +336,14 @@ fn bad_stack_read_write() {
 
     assert!(valgrind_state.update_stack_pointer(512).is_ok());
     assert_eq!(valgrind_state.stack_pointer, 512);
-    assert_eq!(valgrind_state.read(256, 16), Err(AccessError::InvalidRead {addr: 256, len: 16}));
-    assert_eq!(valgrind_state.write(500, 32), Err(AccessError::InvalidWrite {addr: 500, len: 32}));
+    assert_eq!(
+        valgrind_state.read(256, 16),
+        Err(AccessError::InvalidRead { addr: 256, len: 16 })
+    );
+    assert_eq!(
+        valgrind_state.write(500, 32),
+        Err(AccessError::InvalidWrite { addr: 500, len: 32 })
+    );
 }
 
 #[test]
@@ -259,7 +361,19 @@ fn stack_underflow() {
     let mut valgrind_state = Valgrind::new(640 * 1024, 1024);
 
     assert!(valgrind_state.update_stack_pointer(800).is_ok());
-    assert_eq!(valgrind_state.update_stack_pointer(1025), Err(AccessError::OutOfBounds {addr: 800, len: 225}));
-    assert_eq!(valgrind_state.update_stack_pointer(2000), Err(AccessError::OutOfBounds {addr: 800, len: 1200}));
+    assert_eq!(
+        valgrind_state.update_stack_pointer(1025),
+        Err(AccessError::OutOfBounds {
+            addr: 800,
+            len: 225
+        })
+    );
+    assert_eq!(
+        valgrind_state.update_stack_pointer(2000),
+        Err(AccessError::OutOfBounds {
+            addr: 800,
+            len: 1200
+        })
+    );
     assert_eq!(valgrind_state.stack_pointer, 800);
 }

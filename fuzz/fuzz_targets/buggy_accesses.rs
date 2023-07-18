@@ -2,8 +2,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use libfuzzer_sys::arbitrary::{Arbitrary, Unstructured};
-use wasm_valgrind::Valgrind;
-use wasm_valgrind::AccessError;
+use wasm_valgrind::{Valgrind, MemState, AccessError};
 
 const TEST_MAX_ADDR: usize = 1024 * 640 - 1;
 const TEST_MAX_STACK_SIZE: usize = 1024;
@@ -15,6 +14,7 @@ fuzz_target!(|data: &[u8]| {
         Ok(val) => val,
         Err(_) => return,
     };
+    println!("commands: {:?}", cmds);
     assert_eq!(cmds.commands.len(), cmds.results.len());
     for (cmd, result) in cmds.commands.iter().zip(cmds.results.iter()) {
         let cmd: &Command = cmd;
@@ -26,10 +26,10 @@ fuzz_target!(|data: &[u8]| {
                 assert_eq!(valgrind_state.free(addr), *result);
             }
             &Command::Read { addr, len } => {
-                assert!(valgrind_state.read(addr, len).is_ok());
+                assert_eq!(valgrind_state.read(addr, len), *result);
             }
             &Command::Write { addr, len } => {
-                assert!(valgrind_state.write(addr, len).is_ok());
+                assert_eq!(valgrind_state.write(addr, len), *result);
             }
         }
     }
@@ -39,9 +39,13 @@ fuzz_target!(|data: &[u8]| {
 pub struct Allocation {
     addr: usize,
     len: usize,
+    memstate: Vec<MemState>,
 } //TODO: model the stack as an allocation
 
 impl Allocation {
+    fn new(addr: usize, len: usize) -> Allocation {
+        Allocation { addr: addr, len: len, memstate: vec![MemState::ValidToWrite; len] }
+    }
     fn no_overlaps(&self, other: &Allocation) -> bool {
         other.addr + other.len <= self.addr || self.addr + self.len <= other.addr 
     }
@@ -76,10 +80,10 @@ impl BuggyCommandSequenceState {
     fn update(&mut self, cmd: &Command) {
         match cmd {
             &Command::Malloc { addr, len } => {
-                let alloc = Allocation { addr, len };
+                let alloc = Allocation::new(addr, len);
                 let validity = is_malloc_valid(&alloc, &self);
                 if validity.is_ok() {
-                    self.allocations.push(Allocation { addr, len });
+                    self.allocations.push(Allocation::new(addr, len));
                 }
             }
             &Command::Free { addr } => {
@@ -87,6 +91,17 @@ impl BuggyCommandSequenceState {
                 if validity.is_ok() {
                     let index = self.allocations.iter().position(|alloc| alloc.addr == addr).unwrap();
                     self.allocations.remove(index);
+                }
+            }
+            &Command::Write { addr, len } => {
+                let validity = is_write_valid(addr, len, &self);
+                if validity.is_ok() {
+                    let index = self.allocations.iter().position(|alloc| alloc.addr <= addr && addr + len <= alloc.addr + alloc.len).unwrap();
+                    let alloc_addr = self.allocations[index].addr;
+                    let write_to = &mut self.allocations[index].memstate;
+                    for i in 0..len {
+                        write_to[addr - alloc_addr + i] = MemState::ValidToReadWrite;
+                    }
                 }
             }
             _ => {}
@@ -101,11 +116,11 @@ impl<'a> Arbitrary<'a> for BuggyCommandSequence {
         let mut results = vec![];
         let mut state = BuggyCommandSequenceState::new();
         for _ in 0..u.int_in_range(1..=20)? {
-            let cmd = match u.int_in_range(0..=1)? {
+            let cmd = match u.int_in_range(0..=3)? {
                 0 => {
                     let malloc_addr = u.int_in_range(1..=TEST_MAX_ADDR)?;
                     let malloc_len = u.int_in_range(1..=TEST_MAX_ADDR)?;
-                    let alloc = Allocation { addr: malloc_addr, len: malloc_len };
+                    let alloc = Allocation::new(malloc_addr, malloc_len);
                     results.push(is_malloc_valid(&alloc, &state));
                     Command::Malloc { addr: malloc_addr, len: malloc_len }
                 }
@@ -121,11 +136,23 @@ impl<'a> Arbitrary<'a> for BuggyCommandSequence {
                     results.push(is_free_valid(unalloc_addr, &state));
                     Command::Free { addr: unalloc_addr }
                 }
+                2 => {
+                    let read_addr = u.choose_index(TEST_MAX_ADDR)?;
+                    let read_len = u.int_in_range(1..=TEST_MAX_ADDR)?;
+                    results.push(is_read_valid(read_addr, read_len, &state));
+                    Command::Read { addr: read_addr, len: read_len }
+                }
+                3 => {
+                    let write_addr = u.choose_index(TEST_MAX_ADDR)?;
+                    let write_len = u.int_in_range(1..=TEST_MAX_ADDR)?;
+                    results.push(is_write_valid(write_addr, write_len, &state));
+                    Command::Write { addr: write_addr, len: write_len }
+                }
                 _ => {
                     unreachable!()
                 }
             };
-            println!("{:?} allocs: {:?} resutls: {:?}", cmd, state.allocations, results);
+            // println!("{:?} allocs: {:?} resutls: {:?}", cmd, state.allocations, results);
             state.update(&cmd);
             commands.push(cmd);
         }
@@ -150,6 +177,41 @@ fn is_malloc_valid(alloc: &Allocation, state: &BuggyCommandSequenceState) -> Res
 fn is_free_valid(addr: usize, state: &BuggyCommandSequenceState) -> Result<(), AccessError> {
     if !state.allocations.iter().any(|alloc| alloc.addr == addr) {
         return Err(AccessError::InvalidFree { addr });
+    } else { 
+        return Ok(());
+    }
+}
+
+fn is_read_valid(addr: usize, len: usize, state: &BuggyCommandSequenceState) -> Result<(), AccessError> {
+    let dummy = Allocation::new(addr, len);
+    if !dummy.is_in_bounds() {
+        return Err(AccessError::OutOfBounds { addr, len });
+    }
+    let in_range: Vec<_> = state.allocations.iter()
+                                    .filter(|alloc| alloc.addr <= addr && 
+                                        addr + len <= alloc.addr + alloc.len && alloc.memstate.contains(&MemState::ValidToReadWrite)).collect();
+    if in_range.is_empty() {
+        return Err(AccessError::InvalidRead { addr, len });
+    } else {
+        let memstate_addr = addr - &in_range[0].addr;
+        for i in memstate_addr..memstate_addr + len {
+            // println!("{:?}", mem_index);
+            if in_range[0].memstate[i] != MemState::ValidToReadWrite {
+                return Err(AccessError::InvalidRead { addr, len });
+            }
+        }
+        return Ok(());
+    }
+}
+
+fn is_write_valid(addr: usize, len: usize, state: &BuggyCommandSequenceState) -> Result<(), AccessError> {
+    let dummy = Allocation::new(addr, len);
+    //this doesn't include stack... have to change to include validity for stack read/writes
+    if !dummy.is_in_bounds() {
+        return Err(AccessError::OutOfBounds { addr, len });
+    }
+    if !state.allocations.iter().any(|alloc| alloc.addr <= addr && addr + len <= alloc.addr + alloc.len) {
+        return Err(AccessError::InvalidWrite { addr, len });
     } else { 
         return Ok(());
     }
